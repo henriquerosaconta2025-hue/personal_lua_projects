@@ -132,6 +132,8 @@ ffi.cdef([[
 
   const char *inet_ntop(int af, const void *src, char *dst, size_t size);
   void freeaddrinfo(struct addrinfo *res);
+
+  int clock_gettime(int clk_id, struct timeeval *tp);
 ]])
 
 local c = ffi.C
@@ -143,6 +145,14 @@ end
 
 function m.geterrorstr(err)
    return fstring(c.strerror(err or ffi.errno()))
+end
+
+function m.nanotime()
+    local ts = ffi.new("struct timeeval")
+    ffi.C.clock_gettime(4, ts)
+
+    return tonumber(ts.tv_sec) * 1000000000
+         + tonumber(ts.tv_usec)
 end
 
 function m.settimeoutv2(t)
@@ -344,7 +354,7 @@ function m.tcp()
     end,
 
     read = function(self, len)
-      local internalbuf = ffi.new("char[?]", 65536, 0)
+      local internalbuf = ffi.new("char[?]", 65536)
       local n = c.read(sock, internalbuf, len or 65536)
       if n <= 0 then return nil end
       return ffi.string(internalbuf, n)
@@ -352,7 +362,8 @@ function m.tcp()
 
     write = function(self, data)
       local len = #data
-      local buf = ffi.new("char[?]", len, data)
+      local buf = ffi.new("char[?]", len)
+      ffi.copy(buf, data, len)
       local n = c.write(sock, buf, len)
       if n <= 0 then return nil end
       return n
@@ -471,11 +482,11 @@ function m.udp()
       addr.sin_addr.s_addr = c.inet_addr(ip or "127.0.0.1")
       return c.sendto(sock, data, #data, 0, ffi.cast("struct sockaddr *", addr), ffi.sizeof(addr))
     end,
-    recvfrom = function(self, len)
+    recvfrom = function(self, len, flags)
       local buf = ffi.new("char[?]", len)
       local addr = ffi.new("struct sockaddr_in")
       local addrlen = ffi.new("int[1]", ffi.sizeof(addr))
-      local n = c.recvfrom(sock, buf, len, 0, ffi.cast("struct sockaddr *", addr), addrlen)
+      local n = c.recvfrom(sock, buf, len, flags or 0, ffi.cast("struct sockaddr *", addr), addrlen)
       if n <= 0 then return nil end
       return fstring(buf, n), fstring(c.inet_ntoa(addr.sin_addr)), c.ntohs(addr.sin_port)
     end,
@@ -594,65 +605,6 @@ end
 
 
 
-
-
-
-
-
-
-local ssl = require("luajit_replit.sslnet")
-
-function m.request(infos)
-  infos.timeout = infos.timeout or 1500
-  local tcp = m.tcp()
-  local url = m.decodeUrl(infos.url)
-  local req = {
-    (infos.method or "GET") .. " %s %s\r\n",
-    "Host: %s\r\n",
-  }
-  if infos.headers then
-    for k, v in pairs(infos.headers) do
-      table.insert(req, tostring(k) .. ": " .. tostring(v) .. "\r\n")
-    end
-  end
-
-  table.insert(req, "\r\n")
-  if infos.body then
-    table.insert(req, infos.body)
-  end
-
-  if url.method == "https" then -- i mean scheme, but method is OK
-
-    if not url.url then
-      error("missing URL")
-    end
-
-    tcp:settimeout(infos.timeout)
-    tcp:connect("{ip}" .. (url.url or ""), 443)
-    local sslobj = ssl.prepare(tcp, url.url)
-    local pumped = ""
-    if sslobj == -1 then return end
-
-    sslobj:write(table.concat(req):format(url.path or "/", infos.version or "HTTP/1.1", url.url))
-
-    while true do
-       local data, close = sslobj:read(2048)
-       if not data then break end
-       if close then break end
-
-       if infos.stream then 
-          local streamres = infos.stream(data)
-          if streamres then break end 
-       end
-       pumped = pumped .. tostring(data)
-    end
-
-    tcp:close()
-    sslobj:free()
-    return pumped, m.parse(pumped)
-  end
-  error("unknown method: " .. tostring(url.method))
-end
 
 function m.udppacket(t)
    local data = tostring(t.payload)
