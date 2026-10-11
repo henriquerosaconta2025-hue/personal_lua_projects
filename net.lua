@@ -75,7 +75,7 @@ ffi.cdef([[
     int flags
   );
 
-  struct timeeval {
+  struct timeval {
    long tv_sec;
    long tv_usec;
   };
@@ -92,6 +92,15 @@ ffi.cdef([[
     unsigned short check;
     unsigned int saddr;
     unsigned int daddr;
+  };
+
+  struct icmp_header {
+    uint8_t  type;
+    uint8_t  code;
+    uint16_t checksum;
+    uint16_t identifier;
+    uint16_t sequence;
+    uint8_t  payload[65507];
   };
 
   struct udphdr {
@@ -133,7 +142,7 @@ ffi.cdef([[
   const char *inet_ntop(int af, const void *src, char *dst, size_t size);
   void freeaddrinfo(struct addrinfo *res);
 
-  int clock_gettime(int clk_id, struct timeeval *tp);
+  int clock_gettime(int clk_id, struct timeval *tp);
 ]])
 
 local c = ffi.C
@@ -148,7 +157,7 @@ function m.geterrorstr(err)
 end
 
 function m.nanotime()
-    local ts = ffi.new("struct timeeval")
+    local ts = ffi.new("struct timeval")
     ffi.C.clock_gettime(4, ts)
 
     return tonumber(ts.tv_sec) * 1000000000
@@ -157,7 +166,7 @@ end
 
 function m.settimeoutv2(t)
   local fd = t.fd
-  local vms = ffi.new("struct timeeval")
+  local vms = ffi.new("struct timeval")
   vms.tv_sec = t.secReadtimeo
   vms.tv_usec = t.usecReadtimeo
 
@@ -255,27 +264,15 @@ function m.parse(httptext)
   if not httptext then return {} end
   local result = {}
   local headers = {}
-  local body_started = false
-  local body_lines = {}
 
-  local first_line = true
+  result.version, result.status, result.statustext = httptext:match("^(%S+)%s+(%S+)%s+(%S+)")
 
-  for line in httptext:gmatch("[^\r\n]+") do
-    if first_line then
-      result.version, result.status, result.statustext = line:match("^(%S+)%s+(%S+)%s+(.+)")
-      first_line = false
-    elseif line == "" then
-      body_started = true
-    elseif body_started then
-      table.insert(body_lines, line)
-    else
-      local k, v = line:match("^(.-):%s*(.*)")
-      if k and v then headers[k:lower()] = v end
-    end
+  for camp, content in httptext:gmatch("(%S+):%s+([^\r\n]+)") do
+     headers[camp:lower()] = content
   end
 
   result.headers = headers
-  result.body = httptext:match("\r?\n\r?\n(.*)")
+  result.body = httptext:match("\r?\n\r?\n(.+)")
   return result
 end
 
@@ -356,7 +353,7 @@ function m.tcp()
     read = function(self, len)
       local internalbuf = ffi.new("char[?]", 65536)
       local n = c.read(sock, internalbuf, len or 65536)
-      if n <= 0 then return nil end
+      if n <= 0 then return nil, tonumber(n) end
       return ffi.string(internalbuf, n)
     end,
 
@@ -402,7 +399,7 @@ function m.tcp()
         port = c.ntohs(addr.sin_port),
         send = function(selff, data)
           if not data then return end
-          return c.write(fd, data, #data)
+          return c.write(fd, tostring(data), #tostring(data))
         end,
         close = function(selff)
           return c.close(fd)
@@ -410,7 +407,7 @@ function m.tcp()
         read = function(selff, len)
           local buf = ffi.new("char[?]", len)
           local n = c.read(fd, buf, len)
-          if n <= 0 then return nil end
+          if n <= 0 then return nil, n end
           return fstring(buf, n)
         end,
         getpeer = function(selff)
@@ -520,11 +517,11 @@ end
 
 
 
-function m.raw(prot)
+function m.raw(domain, prot, type)
   local obj = {}
   local mt = {}
 
-  local sock = c.socket(2, 3, prot or 255)
+  local sock = c.socket(domain or 2, type or 3, prot or 255)
 
   setmetatable(obj, mt)
 
@@ -562,6 +559,25 @@ function m.raw(prot)
         sock,
         buf,
         ffi.sizeof(data),
+        0,
+        ffi.cast("struct sockaddr *", addr),
+        ffi.sizeof(addr)
+      )
+    end,
+
+    sendtorawsize = function(self, data, ip, size)
+      data = data or ""
+      local addr = ffi.new("struct sockaddr_in")
+      addr.sin_family = 2
+      addr.sin_port = 0
+      addr.sin_addr.s_addr = c.inet_addr(ip or "127.0.0.1")
+
+      local buf = ffi.cast("const char*", data)
+
+      return c.sendto(
+        sock,
+        buf,
+        size,
         0,
         ffi.cast("struct sockaddr *", addr),
         ffi.sizeof(addr)
@@ -656,6 +672,24 @@ function m.checksum(data, len)
     end
 
     return bit.band(bit.bnot(sum), 0xFFFF)
+end
+
+function m.icmp(type, ip, payload, sequence, id)
+   local header = ffi.new("struct icmp_header")
+   local sock = m.raw(2, 1)
+
+   header.checksum = 0
+   ffi.copy(header.payload, payload, #payload)
+   header.identifier = ffi.C.htons(id or 1)
+   header.sequence = ffi.C.htons(sequence or 1)
+   header.type = type
+   header.code = 0
+
+   header.checksum = ffi.C.htons(m.checksum(ffi.cast("uint8_t*", header), 8 + #payload))
+
+   sock:sendtorawsize(header, m.dresolve(ip, 0), 8 + #payload)
+
+   return sock
 end
 
 return m
