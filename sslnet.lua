@@ -1,31 +1,38 @@
 local ffi = require("ffi")
 local system = {}
-local ok, ssl = pcall(ffi.load, "/usr/lib/x86_64-linux-gnu/libssl.so.3")
+local bit = require("bit")
+
+local ok, ssl = pcall(ffi.load, "libssl.so.3")
 if not ok then
    ssl = ffi.load("/usr/lib/libssl.so.3")
 end
-ffi.cdef([[
+
+ffi.cdef[[
 struct ssl_st;
 struct ssl_ctx_st;
 struct ssl_st* SSL_new(struct ssl_ctx_st*);
 struct ssl_ctx_st* SSL_CTX_new(const void* method);
 typedef struct evp_cipher_ctx_st EVP_CIPHER_CTX;
+typedef struct x509_st X509;
+typedef struct X509_name_st X509_NAME;
+
+void SSL_CTX_set_verify(void *ctx, int mode, void *callback);
+
+const char *SSL_get_version(const struct ssl_st *s);
+
+X509 *SSL_get1_peer_certificate(struct ssl_st *ssl);
+X509_NAME *X509_get_issuer_name(const X509 *x);
+X509_NAME *X509_get_subject_name(const X509 *x);
+
+long SSL_get_verify_result(struct ssl_st *s);
+char* X509_verify_cert_error_string(int);
+
+void X509_free(X509 *x);
+int X509_get_version(const X509 *x);
+char *X509_NAME_oneline(const X509_NAME *a, char *buf, int size);
 
 int RAND_bytes(unsigned char *buf, int num);
-
-EVP_CIPHER_CTX *EVP_CIPHER_CTX_new(void);
-void EVP_CIPHER_CTX_free(EVP_CIPHER_CTX *ctx);
-const void *EVP_aes_256_gcm(void);
-
-int EVP_EncryptInit_ex(EVP_CIPHER_CTX *ctx, const void *cipher, void *impl, const unsigned char *key, const unsigned char *iv);
-int EVP_EncryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl, const unsigned char *in, int inl);
-int EVP_EncryptFinal_ex(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl);
-int EVP_CIPHER_CTX_ctrl(EVP_CIPHER_CTX *ctx, int type, int arg, void *ptr);
-
-int EVP_DecryptInit_ex(EVP_CIPHER_CTX *ctx, const void *cipher, void *impl, const unsigned char *key, const unsigned char *iv);
-int EVP_DecryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl, const unsigned char *in, int inl);
-int EVP_DecryptFinal_ex(EVP_CIPHER_CTX *ctx, unsigned char *out, int *outl);
-
+int SSL_CTX_set_default_verify_paths(struct ssl_ctx_st *ctx);
 
 const void* TLS_method(void);
 
@@ -66,7 +73,7 @@ void SSL_CTX_set_msg_callback_arg(void *ctx, void *arg);
 int SSL_CTX_set_cipher_list(struct ssl_ctx_st *ctx, const char *str);
 int SSL_do_handshake(struct ssl_st *ssl);
 int SSL_get_error(const struct ssl_st *ssl, int ret);
-]])
+]]
 
 -- magic n̴̫͊ủ̴̥m̵̳̃b̴͊ͅe̴̤̐r̵͙̓ś̸̫
 local SNI_FLAG = 55
@@ -250,58 +257,6 @@ end
 
 function system.handshakestep(sobj)
   return ffi.C.SSL_do_handshake(sobj)
-end
-
-function system.encrypt(data, key, iv)
-    local ctx = ssl.EVP_CIPHER_CTX_new()
-    local out = ffi.new("unsigned char[?]", #data)
-    local outl = ffi.new("int[1]")
-    local tag = ffi.new("unsigned char[16]")
-
-    ssl.EVP_EncryptInit_ex(ctx, ssl.EVP_aes_256_gcm(), nil, key, iv)
-    ssl.EVP_EncryptUpdate(ctx, out, outl, data, #data)
-
-    local final_outl = ffi.new("int[1]")
-
-    ssl.EVP_EncryptFinal_ex(ctx, nil, final_outl)
-    ssl.EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag)
-
-    local ciphertext = ffi.string(out, outl[0])
-    local tag_str = ffi.string(tag, 16)
-
-    ssl.EVP_CIPHER_CTX_free(ctx)
-
-    return ciphertext .. tag_str
-end
-
-function system.decrypt(encrypted_data, key, iv)
-    local tag_len = 16
-    local data_len = #encrypted_data - tag_len
-    if data_len <= 0 then return nil, "Pacote muito curto" end
-
-    local ciphertext = encrypted_data:sub(1, data_len)
-    local tag_str = encrypted_data:sub(data_len + 1)
-
-    local ctx = ssl.EVP_CIPHER_CTX_new()
-    local out = ffi.new("unsigned char[?]", data_len)
-    local outl = ffi.new("int[1]")
-
-    ssl.EVP_DecryptInit_ex(ctx, ssl.EVP_aes_256_gcm(), nil, key, iv)
-    ssl.EVP_DecryptUpdate(ctx, out, outl, ciphertext, data_len)
-
-    local tag_ptr = ffi.cast("unsigned char*", tag_str)
-    ssl.EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, tag_len, tag_ptr)
-
-    local final_outl = ffi.new("int[1]")
-    local status = ssl.EVP_DecryptFinal_ex(ctx, out + outl[0], final_outl)
-
-    local result = nil
-    if status > 0 then
-        result = ffi.string(out, outl[0] + final_outl[0])
-    end
-
-    ssl.EVP_CIPHER_CTX_free(ctx)
-    return result, (status <= 0 and "AUTH_FAILED" or nil)
 end
 
 function system.randombytes(len)
