@@ -16,6 +16,7 @@ typedef struct evp_cipher_ctx_st EVP_CIPHER_CTX;
 typedef struct x509_st X509;
 typedef struct X509_name_st X509_NAME;
 
+int SSL_CTX_load_verify_locations(struct ssl_ctx_st *ctx, const char *CAfile, const char *CApath);
 void SSL_CTX_set_verify(void *ctx, int mode, void *callback);
 
 const char *SSL_get_version(const struct ssl_st *s);
@@ -75,10 +76,7 @@ int SSL_do_handshake(struct ssl_st *ssl);
 int SSL_get_error(const struct ssl_st *ssl, int ret);
 ]]
 
--- magic n̴̫͊ủ̴̥m̵̳̃b̴͊ͅe̴̤̐r̵͙̓ś̸̫
 local SNI_FLAG = 55
-local EVP_CTRL_GCM_GET_TAG = 0x10
-local EVP_CTRL_GCM_SET_TAG = 0x11
 
 function system.geterror()
   local err = ssl.ERR_get_error()
@@ -150,13 +148,26 @@ function system.privatekey(ctx, keystr, pem)
 end
 
 function system.prepare(tcp, sni)
-  if tcp.fd == nil then error("tcp is not a valid tcp object (prepare)") end
-
   local ctx = system.newctx()
   local sobj = system.newctxobj(ctx)
+
   system.setfd(sobj, tcp.fd())
-  system.sni(sobj, tostring(sni) or "www.google.com")
-  local stat = system.sconnect(sobj)
+  system.cipher(ctx, "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256")
+  system.API.SSL_CTX_set_default_verify_paths(ctx)
+  system.API.SSL_CTX_set_verify(ctx, 1, ffi.NULL)
+
+  system.sni(sobj, tostring(sni))
+
+  local stat = -67
+  while true do
+     if stat == -67 then
+        stat = system.sconnect(sobj)
+        if stat == 1 then break end
+     end
+     stat = system.sconnect(sobj)
+     if stat == 1 then break end
+  end
+
   if stat == 1 then
     return {
       sobj = sobj,
@@ -172,6 +183,27 @@ function system.prepare(tcp, sni)
       end,
       shutdown = function(self)
         return system.sshutdown(sobj)
+      end,
+      peer = function ()
+          local cert = system.API.SSL_get1_peer_certificate(sobj)
+          return {
+            issuername = function (size)
+              local issuerbuf = ffi.new("char[?]", size)
+              local issuer = system.API.X509_get_issuer_name(cert)
+              system.API.X509_NAME_oneline(issuer, issuerbuf, size - 1)
+              return ffi.string(issuerbuf)
+            end,
+            subject = function (size)
+              local subjectbuf = ffi.new("char[?]", size)
+              local subject = system.API.X509_get_subject_name(cert)
+              system.API.X509_NAME_oneline(subject, subjectbuf, size - 1)
+              return ffi.string(subjectbuf)
+            end,
+            free = function ()
+              return system.API.X509_free(cert)
+            end,
+            cert = cert
+          }
       end
     }
   else
