@@ -1,9 +1,9 @@
 local xterm = {}
 local ffi = require("ffi")
 local lastsig = 0
+local bit = require("bit")
 
 local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-
 
 function _64encode(data)
     return ((data:gsub('.', function(x)
@@ -108,8 +108,9 @@ function xterm:setmode(fd, modes)
   return original
 end
 
-function xterm:gettermios()
+function xterm:gettermios(fd)
   local termios = ffi.new("struct termios")
+  ffi.C.tcgetattr(fd or 0, termios)
   return termios
 end
 
@@ -176,8 +177,72 @@ function xterm:read(bytes)
   return ffi.string(buf, readed), readed
 end
 
+function xterm:icannon(state)
+   local termios = ffi.new("struct termios")
+   ffi.C.tcgetattr(0, termios)
+
+   if state == true then
+      termios.c_lflag = bit.band(termios.c_lflag, bit.bnot(0x02))
+   else
+      termios.c_lflag = bit.bor(termios.c_lflag, 0x02)
+   end
+
+   ffi.C.tcsetattr(0, 0, termios)
+   return termios
+end
+
+function xterm:autonewline(state)
+   local termios = ffi.new("struct termios")
+   ffi.C.tcgetattr(0, termios)
+
+   if state == false then
+      termios.c_oflag = bit.bor(termios.c_oflag, 0x04)
+   else
+      termios.c_oflag = bit.band(termios.c_oflag, bit.bnot(0x04))
+   end
+
+   ffi.C.tcsetattr(0, 0, termios)
+   return termios
+end
+
+function xterm:isig(state)
+   local termios = ffi.new("struct termios")
+   ffi.C.tcgetattr(0, termios)
+
+   if state == true then
+      termios.c_lflag = bit.bor(termios.c_lflag, 0x01)
+   else
+      termios.c_lflag = bit.band(termios.c_lflag, bit.bnot(0x01))
+   end
+
+   ffi.C.tcsetattr(0, 0, termios)
+   return termios
+end
+
+function xterm:echo(state)
+   local termios = ffi.new("struct termios")
+   ffi.C.tcgetattr(0, termios)
+
+   if state == false then
+      termios.c_lflag = bit.band(termios.c_lflag, bit.bnot(0x08))
+   else
+      termios.c_lflag = bit.bor(termios.c_lflag, 0x08)
+   end
+
+   ffi.C.tcsetattr(0, 0, termios)
+   return termios
+end
+
 function xterm:init()
-  os.execute("stty raw -echo")
+   os.execute("stty raw -echo")
+end
+
+function xterm:reset()
+  io.write("\27[?1003l")
+  io.write("\27[?1049l")
+  io.flush()
+  os.execute("stty sane")
+  io.flush()
 end
 
 function xterm.thrpause()
@@ -211,6 +276,7 @@ function xterm:text(text, x, y, r, g, b)
     end,
 
     changetext = function(self, newtext, nr, ng, nb)
+      newtext = tostring(newtext)
       local old = #self.text
       lasttext = newtext
       self.text = newtext
@@ -223,6 +289,7 @@ function xterm:text(text, x, y, r, g, b)
     end,
 
     move = function(self, txt, nx, ny)
+       txt = tostring(txt)
        local currtextlen = #self.text
        io.write(string.format("\27[%s;%sH%s", self.y, self.x, string.rep(" ", currtextlen)))
        io.flush()
@@ -242,14 +309,6 @@ end
 
 function xterm:mousereset()
   io.write("\27[?1003l")
-  io.flush()
-end
-
-function xterm:reset()
-  io.write("\27[?1003l")
-  io.write("\27[?1049l")
-  io.flush()
-  os.execute("stty sane")
   io.flush()
 end
 
@@ -404,39 +463,6 @@ function xterm:checkbox(y, x, t)
     }
 end
 
-function xterm:input(x, y, r, g, b, t)
-  --- this is only used with the xterm:init() actived. else, it will break.
-  local obj = {}
-  obj.text = ""
-  obj.focused = false
-  obj.inputbox = xterm:text(t.inicialtext, x, y, r, g, b)
-
-  return {
-    update = function (mouse)
-       if mouse then
-            local key = mouse.key
-
-            if obj.focused and key and not mouse.x and not mouse.y then
-              local byte = key:byte()
-               if byte == 127 or byte == 8 then
-                   obj.text = obj.text:sub(1, -2)
-               else
-                   obj.text = obj.text .. key
-               end
-            end
-
-            if obj.inputbox:detectcollision(mouse.x, mouse.y) and mouse.click == "down" and mouse.type == "left" then
-                obj.focused = not obj.focused
-            end
-
-            if t.onupdate then
-               t.onupdate(key, obj)
-            end
-       end
-    end
-  }
-end
-
 function xterm:clearline()
   io.write("\r\27[2K")
   io.flush()
@@ -448,6 +474,26 @@ end
 
 function xterm:restoreCursor()
   io.write("\27[u"); io.flush()
+end
+
+function xterm:up(steps)
+    io.write("\27[" .. steps .. "A"); io.flush()
+end
+
+function xterm:down(steps)
+    io.write("\27[" .. steps .. "B"); io.flush()
+end
+
+function xterm:cgo(steps)
+   io.write("\27[" .. steps .. "C"); io.flush()
+end
+
+function xterm:cback(steps)
+   io.write("\27[" .. steps .. "D"); io.flush()
+end
+
+function xterm:termbgcolor(RRRR, GGGG, BBBB)
+  io.write(string.format("\27]11;rgb:%s/%s/%s\7", RRRR, GGGG, BBBB)); io.flush()
 end
 
 xterm.base64encoder = _64encode
