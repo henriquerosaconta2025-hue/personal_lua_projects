@@ -9,6 +9,8 @@ ffi.cdef [[
    unsigned char d_type;
    char d_name[256];
   };
+  long telldir(void*);
+  void seekdir(void* dirp, long loc);
 
   struct dirent* readdir(void* dir);
   void* opendir(const char* path);
@@ -23,6 +25,12 @@ ffi.cdef [[
   ssize_t read(int fd, void *buf, size_t count);
   ssize_t write(int fd, const void *buf, size_t count);
   ssize_t close(int fd);
+  ssize_t readlink(const char *path, char *buf, size_t bufsiz);
+  int chdir(const char *path);
+  char *getcwd(char *buf, uint64_t size);
+  int access(const char *pathname, int mode);
+  int symlink(const char *target, const char *linkpath);
+  int link(const char *oldpath, const char *newpath);
 ]]
 
 function system.dir(path)
